@@ -35,5 +35,104 @@ from ..common import ERROR, parse_yolo_line  # noqa: F401
 
 
 def fix(ds, issues, cfg):
-    # TODO
-    raise NotImplementedError("autofix chưa làm")
+    fixes = []
+    removed_stems = set()
+
+    for i in issues:
+        if i.severity != ERROR:
+            continue
+        if i.code in {"DUP_IMAGE_EXACT", "DUP_IMAGE_NEAR", "LEAK_TEST", "CORRUPT_IMAGE", "BAD_SIZE"}:
+            removed_stems.add(i.image)
+
+    for stem in sorted(removed_stems):
+        ip = ds.image_path(stem)
+        lp = ds.label_path(stem)
+        if ip is not None:
+            ip.unlink(missing_ok=True)
+        lp.unlink(missing_ok=True)
+        fixes.append(dict(image=stem, line="", action="remove_image",
+                          before="ảnh + nhãn", after="đã xoá"))
+
+    drops = defaultdict(set)
+    clips = {}
+    need_labels = set()
+
+    drop_codes = {"BAD_FORMAT", "BAD_CLASS_ID", "BOX_ZERO", "DUP_BOX"}
+    for i in issues:
+        if i.severity != ERROR or i.image in removed_stems:
+            continue
+        if i.code in drop_codes:
+            drops[i.image].add(i.line)
+        elif i.code == "BOX_OUT_OF_IMAGE":
+            clips.setdefault(i.image, set()).add(i.line)
+        elif i.code == "MISSING_LABEL_FILE":
+            need_labels.add(i.image)
+
+    for stem, lines in list(clips.items()):
+        clips[stem] = lines - drops.get(stem, set())
+        if not clips[stem]:
+            del clips[stem]
+
+    for stem in sorted(drops):
+        lp = ds.label_path(stem)
+        if not lp.exists():
+            continue
+        original = lp.read_text(encoding="utf-8", errors="replace").splitlines()
+        kept = []
+        for line_no, text in enumerate(original, 1):
+            if line_no in drops[stem]:
+                fixes.append(dict(image=stem, line=line_no, action="drop_line",
+                                  before=text, after=""))
+            else:
+                kept.append(text)
+        lp.write_text("\n".join(kept) + ("\n" if kept and original[-1].endswith("\n") else ""),
+                      encoding="utf-8")
+
+    for stem in sorted(clips):
+        lp = ds.label_path(stem)
+        if not lp.exists():
+            continue
+        original = lp.read_text(encoding="utf-8", errors="replace").splitlines()
+        rewritten = list(original)
+        for line_no in sorted(clips[stem]):
+            if line_no > len(original):
+                continue
+            text = original[line_no - 1]
+            if line_no in drops.get(stem, set()):
+                continue
+            try:
+                cls, cx, cy, w, h = parse_yolo_line(text)
+            except ValueError:
+                continue
+            left = max(0.0, cx - w / 2)
+            right = min(1.0, cx + w / 2)
+            top = max(0.0, cy - h / 2)
+            bottom = min(1.0, cy + h / 2)
+            nw, nh = right - left, bottom - top
+            if nw <= 0 or nh <= 0:
+                fixes.append(dict(image=stem, line=line_no, action="drop_line",
+                                  before=text, after=""))
+                rewritten[line_no - 1] = None
+                continue
+            nx, ny = (left + right) / 2, (top + bottom) / 2
+            after = f"{cls} {nx:.6f} {ny:.6f} {nw:.6f} {nh:.6f}"
+            fixes.append(dict(image=stem, line=line_no, action="clip_box",
+                              before=text, after=after))
+            rewritten[line_no - 1] = after
+        kept = [text for text in rewritten if text is not None]
+        lp.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
+
+    for stem in sorted(need_labels):
+        fixes.append(dict(image=stem, line="", action="needs_label",
+                          before="(không có file)", after="chuyển người gán"))
+
+    for i in issues:
+        if i.severity == ERROR and i.code == "BAD_CLASS_NAME":
+            if ds.yaml_path.exists():
+                data = yaml.safe_load(ds.yaml_path.read_text(encoding="utf-8")) or {}
+                data["names"] = list(cfg["classes"])
+                ds.yaml_path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True),
+                                        encoding="utf-8")
+            fixes.append(dict(image="data.yaml", line="", action="rename_classes",
+                              before="names cũ", after=str(cfg["classes"])))
+    return fixes

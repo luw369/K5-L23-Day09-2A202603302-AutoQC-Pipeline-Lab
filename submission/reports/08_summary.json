@@ -1,0 +1,18 @@
+{
+  "verdict": {
+    "decision": "Hold",
+    "n_errors": 0,
+    "n_warn_images": 44,
+    "n_images": 203,
+    "warn_ratio": 0.2167,
+    "reasons": [
+      "Tỉ lệ ảnh có cảnh báo 44/203 = 0.2167 đạt ngưỡng Hold 0.1000"
+    ]
+  },
+  "reviewed": 80,
+  "budget": 80,
+  "seconds": 11.9,
+  "exported": "D:\\DAY9\\K5-L23-Day09-2A202603302-AutoQC-Pipeline-Lab\\submission\\export\\clean_v1",
+  "config_sha1": "82187374d421abcee64783b7dad22f0bd99848cf",
+  "review_sim_sha1": "7988ca22827f780a7043a2300490e679a1697154"
+}

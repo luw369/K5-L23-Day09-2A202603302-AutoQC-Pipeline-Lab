@@ -40,5 +40,70 @@ from ..model_cache import get_preds  # noqa: F401
 
 
 def run(ds, cfg, preds=None):
-    # TODO
-    raise NotImplementedError("check second_opinion chưa làm")
+    so_cfg = cfg["second_opinion"]
+    conf = float(so_cfg["conf"])
+    min_area_px = float(so_cfg["min_area_px"])
+    fp_conf = float(so_cfg["fp_conf"])
+    iou_missing = float(so_cfg["iou_missing"])
+    iou_match = float(so_cfg["iou_match"])
+    iou_loose = float(so_cfg["iou_loose"])
+    preds = preds if preds is not None else get_preds(ds, cfg, "checker")
+    issues = []
+
+    for p in ds.image_files():
+        stem = p.stem
+        if ds.label_path(stem).exists() is False or stem not in preds:
+            continue
+        size = ds.image_size(stem)
+        if size is None:
+            continue
+        width, height = size
+        labels = ds.valid_boxes(stem)
+        P = []
+        for pred in preds[stem]:
+            cls, pc, cx, cy, w, h = pred
+            area = w * width * h * height
+            if pc >= conf and area >= min_area_px:
+                P.append((cls, pc, (cx, cy, w, h)))
+
+        for cls, pc, box in P:
+            cands = [(lab, iou_xywh(box, lab[1:])) for lab in labels
+                     if iou_xywh(box, lab[1:]) >= iou_missing]
+            if not cands:
+                issues.append(Issue("second_opinion", WARN, "POSSIBLE_MISSING", stem,
+                                    "Model thấy vật thể không có nhãn", None,
+                                    {"conf": pc}))
+                continue
+            same = [(lab, iou) for lab, iou in cands if lab[0] == cls]
+            if same:
+                lab, best = max(same, key=lambda x: x[1])
+                if best < iou_loose:
+                    issues.append(Issue("second_opinion", WARN, "POSSIBLE_LOOSE_BOX", stem,
+                                        "Box có thể lỏng hoặc lệch", None,
+                                        {"iou": best, "conf": pc}))
+                continue
+            different = [(lab, iou) for lab, iou in cands if lab[0] != cls]
+            if different:
+                lab, best = max(different, key=lambda x: x[1])
+                if best >= iou_match:
+                    issues.append(Issue("second_opinion", WARN, "POSSIBLE_WRONG_CLASS", stem,
+                                        "Lớp nhãn có thể sai", None,
+                                        {"iou": best, "conf": pc}))
+
+        fp_preds = [(pred[2], pred[3], pred[4], pred[5])
+                    for pred in preds[stem] if pred[1] >= fp_conf]
+        for line_no, text in ds.read_label_lines(stem) or []:
+            try:
+                lab = parse_yolo_line(text)
+            except ValueError:
+                continue
+            cls, cx, cy, w, h = lab
+            if not 0 <= cls < len(ds.classes):
+                continue
+            box = (cx, cy, w, h)
+            if all(iou_xywh(box, pred) < iou_missing for pred in fp_preds):
+                issues.append(Issue("second_opinion", WARN, "POSSIBLE_FALSE_POS", stem,
+                                    "Nhãn box không khớp dự đoán model", line_no,
+                                    {"iou": max((iou_xywh(box, pred) for pred in fp_preds),
+                                                default=0.0)}))
+    return issues
